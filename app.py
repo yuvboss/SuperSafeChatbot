@@ -18,7 +18,7 @@ from auth import (
 
 load_dotenv()
 
-st.set_page_config(page_title="SuperSafe", page_icon="🔐", layout="wide")
+st.set_page_config(page_title="Secure Coding Chatbot", page_icon="🔐", layout="wide")
 
 API_KEY_PRESENT = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
@@ -26,7 +26,7 @@ API_KEY_PRESENT = bool(os.environ.get("ANTHROPIC_API_KEY"))
 cookies = stx.CookieManager(key="cookie_mgr")
 
 WELCOME = (
-    "👋 Welcome to **SuperSafe**! I'm your AI security mentor.\n\n"
+    "👋 Welcome to **Secure Coding Chatbot**! I'm your AI security mentor.\n\n"
     "Paste any code (or upload a file) and click **Scan Code** to check for hardcoded "
     "credentials like API keys, passwords, and secrets. You can also ask me any security "
     "question in the chat, or pick a **Lesson** from the sidebar."
@@ -46,7 +46,7 @@ LESSONS = [
     (
         "What Is Entropy Detection?",
         "Explain Shannon entropy, how it detects hardcoded secrets, and why high-entropy "
-        "strings are suspicious — in simple terms a developer would understand.",
+        "strings are suspicious, in simple terms a developer would understand.",
     ),
     (
         "Secrets in Git History",
@@ -81,6 +81,7 @@ _AUTH_CSS = """
     -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
 }
 .auth-header p { font-size: 1.05rem; color: #475569; margin: 0; }
+.auth-header .byline { font-size: 0.8rem; color: #94a3b8; margin-top: 0.35rem; }
 .feature-card {
     background: rgba(255,255,255,0.75); border: 1px solid rgba(99,102,241,0.15);
     border-radius: 16px; padding: 1.4rem 1.2rem; height: 100%;
@@ -153,15 +154,16 @@ def _show_landing():
     with col:
         st.markdown(
             '<div class="hero-badge">🔐</div>'
-            '<div class="auth-header"><h1>SuperSafe</h1>'
-            '<p>Catch hardcoded secrets before they catch you.</p></div>',
+            '<div class="auth-header"><h1>Secure Coding Chatbot</h1>'
+            '<p>Catch hardcoded secrets before they catch you.</p>'
+            '<p class="byline">by SuperSafe</p></div>',
             unsafe_allow_html=True,
         )
         st.markdown(
             '<p style="text-align:center; max-width:560px; margin:0 auto 2rem; color:#334155;">'
-            "SuperSafe is an AI-powered security mentor for developers. Paste your code and it "
+            "Secure Coding Chatbot is an AI-powered security mentor for developers. Paste your code and it "
             "scans for hardcoded API keys, passwords, and tokens, then coaches you through fixing "
-            "them the right way — with environment variables, not guesswork.</p>",
+            "them the right way, with environment variables, not guesswork.</p>",
             unsafe_allow_html=True,
         )
 
@@ -196,8 +198,9 @@ def _show_auth():
     with col:
         st.markdown(
             '<div class="hero-badge">🔐</div>'
-            '<div class="auth-header"><h1>SuperSafe</h1>'
-            '<p>Your AI security mentor</p></div>',
+            '<div class="auth-header"><h1>Secure Coding Chatbot</h1>'
+            '<p>Your AI security mentor</p>'
+            '<p class="byline">by SuperSafe</p></div>',
             unsafe_allow_html=True,
         )
 
@@ -272,7 +275,8 @@ def _init_state():
         "clean_scans_streak": 0,
         "unlocked_achievements": set(),
         "new_achievement_alerts": [],
-        "pending_lesson": None,
+        "current_view": "main",
+        "lesson_chats": {},
         "last_summary": None,
     }
     for k, v in defaults.items():
@@ -292,7 +296,7 @@ with st.sidebar:
         st.rerun()
 
     if not API_KEY_PRESENT:
-        st.warning("No API key — AI responses are placeholders.", icon="⚠️")
+        st.warning("No API key, so AI responses are placeholders.", icon="⚠️")
 
     st.divider()
 
@@ -315,13 +319,24 @@ with st.sidebar:
     st.divider()
 
     st.subheader("Lessons")
+    if st.button("🏠 Main Chat", key="nav_main", use_container_width=True):
+        st.session_state.current_view = "main"
+        st.rerun()
     for title, prompt in LESSONS:
-        if st.button(title, key=f"lesson_{title}", use_container_width=True):
-            st.session_state.pending_lesson = prompt
+        label = f"💬 {title}" if title in st.session_state.lesson_chats else title
+        if st.button(label, key=f"lesson_{title}", use_container_width=True):
+            st.session_state.current_view = title
+            if title not in st.session_state.lesson_chats:
+                st.session_state.lesson_chats[title] = {
+                    "messages": [],
+                    "api_messages": [],
+                    "prompt": prompt,
+                }
+            st.rerun()
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-st.title("SuperSafe 🔐")
-st.caption("Your AI security mentor — paste code to scan for hardcoded secrets")
+st.title("Secure Coding Chatbot 🔐")
+st.caption("Your AI security mentor, paste code to scan for hardcoded secrets")
 
 if not API_KEY_PRESENT:
     st.info(
@@ -333,137 +348,163 @@ if not API_KEY_PRESENT:
 # Achievement alerts earned on the previous action
 if st.session_state.new_achievement_alerts:
     for a in st.session_state.new_achievement_alerts:
-        st.success(f"{a.emoji} **Achievement unlocked: {a.name}** — {a.description}")
+        st.success(f"{a.emoji} **Achievement unlocked: {a.name}**, {a.description}")
     st.balloons()
     st.session_state.new_achievement_alerts = []
 
-# Chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+if st.session_state.current_view != "main":
+    # ── Lesson chat (private thread per lesson, resumable for the session) ─────
+    lesson_title = st.session_state.current_view
+    lesson = st.session_state.lesson_chats[lesson_title]
 
-# ── Pending lesson (triggered by sidebar button) ───────────────────────────────
-if st.session_state.pending_lesson:
-    lesson = st.session_state.pending_lesson
-    st.session_state.pending_lesson = None
+    st.subheader(f"📘 {lesson_title}")
+    if st.button("← Back to main chat"):
+        st.session_state.current_view = "main"
+        st.rerun()
+    st.divider()
 
-    with st.chat_message("user"):
-        st.markdown(lesson)
+    for msg in lesson["messages"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    api_msgs = st.session_state.api_messages + [{"role": "user", "content": lesson}]
-    with st.chat_message("assistant"):
-        response = st.write_stream(stream_response(api_msgs))
-
-    st.session_state.messages.append({"role": "user", "content": lesson})
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    st.session_state.api_messages.append({"role": "user", "content": lesson})
-    st.session_state.api_messages.append({"role": "assistant", "content": response})
-    st.rerun()
-
-# ── Scan form ──────────────────────────────────────────────────────────────────
-with st.form("scan_form", clear_on_submit=True):
-    code_input = st.text_area(
-        "Paste your code here", height=200, placeholder="# Paste code to scan..."
-    )
-    uploaded = st.file_uploader(
-        "...or upload a file",
-        type=["py", "js", "ts", "env", "txt", "yaml", "yml", "json"],
-    )
-    submitted = st.form_submit_button("Scan Code 🔍")
-
-if submitted:
-    source_name = "pasted code"
-    if uploaded is not None:
-        code_input = uploaded.read().decode("utf-8", errors="replace")
-        source_name = uploaded.name
-
-    if not code_input or not code_input.strip():
-        st.warning("Please paste code or upload a file to scan.")
-    else:
-        findings = detect(code_input)
-        masked_code = mask(code_input, findings)
-        preview = masked_code[:2000] + ("…" if len(masked_code) > 2000 else "")
-
-        if findings:
-            table = "| Line | Type | Method |\n|:-----|:-----|:-------|\n"
-            table += "\n".join(
-                f"| {f['line_number']} | {f['type']} | {f['method']} |" for f in findings
-            )
-            user_display = (
-                f"**Scanning `{source_name}`** — {len(findings)} issue(s) detected\n\n"
-                f"{table}\n\n"
-                f"```\n{preview}\n```"
-            )
-        else:
-            user_display = (
-                f"**Scanning `{source_name}`** — ✅ No issues found\n\n```\n{preview}\n```"
-            )
-
+    if not lesson["messages"]:
         with st.chat_message("user"):
-            st.markdown(user_display)
+            st.markdown(lesson["prompt"])
+        with st.chat_message("assistant"):
+            response = st.write_stream(stream_response([{"role": "user", "content": lesson["prompt"]}]))
 
-        st.session_state.scans_total += 1
-        prev = st.session_state.previous_findings_count
+        lesson["messages"].append({"role": "user", "content": lesson["prompt"]})
+        lesson["messages"].append({"role": "assistant", "content": response})
+        lesson["api_messages"].append({"role": "user", "content": lesson["prompt"]})
+        lesson["api_messages"].append({"role": "assistant", "content": response})
+        st.rerun()
 
-        if findings:
-            st.session_state.clean_scans_streak = 0
-            findings_summary = "\n".join(
-                f"- Line {f['line_number']}: {f['type']} (detected via {f['method']})"
-                for f in findings
-            )
-            api_user_content = (
-                f"I submitted code for security scanning. Findings:\n\n{findings_summary}\n\n"
-                f"Sanitized code (secrets replaced with [REDACTED]):\n```\n{masked_code}\n```\n\n"
-                "Please explain each finding, why it's dangerous, and how to fix it using environment variables."
-            )
-        else:
-            st.session_state.clean_scans_streak += 1
-            if prev > 0:
-                st.session_state.findings_fixed += prev
-                st.success(f"🎉 You fixed {prev} finding(s) — great work!")
-            api_user_content = (
-                "I submitted code for security scanning and no hardcoded credentials were detected. "
-                "Please give a brief encouraging message and a quick reminder of good security practices."
-            )
+    if user_text := st.chat_input(
+        f"Ask a follow-up about {lesson_title}...", key=f"lesson_input_{lesson_title}"
+    ):
+        with st.chat_message("user"):
+            st.markdown(user_text)
 
-        st.session_state.previous_findings_count = len(findings)
-
-        new_achievements = check_new_achievements(st.session_state)
-        if new_achievements:
-            st.session_state.new_achievement_alerts = new_achievements
-
-        api_msgs = st.session_state.api_messages + [{"role": "user", "content": api_user_content}]
+        api_msgs = lesson["api_messages"] + [{"role": "user", "content": user_text}]
         with st.chat_message("assistant"):
             response = st.write_stream(stream_response(api_msgs))
 
-        st.session_state.messages.append({"role": "user", "content": user_display})
+        lesson["messages"].append({"role": "user", "content": user_text})
+        lesson["messages"].append({"role": "assistant", "content": response})
+        lesson["api_messages"].append({"role": "user", "content": user_text})
+        lesson["api_messages"].append({"role": "assistant", "content": response})
+        st.rerun()
+
+else:
+    # ── Main scan + chat ─────────────────────────────────────────────────────────
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ── Scan form ────────────────────────────────────────────────────────────────
+    with st.form("scan_form", clear_on_submit=True):
+        code_input = st.text_area(
+            "Paste your code here", height=200, placeholder="# Paste code to scan..."
+        )
+        uploaded = st.file_uploader(
+            "...or upload a file",
+            type=["py", "js", "ts", "env", "txt", "yaml", "yml", "json"],
+        )
+        submitted = st.form_submit_button("Scan Code 🔍")
+
+    if submitted:
+        source_name = "pasted code"
+        if uploaded is not None:
+            code_input = uploaded.read().decode("utf-8", errors="replace")
+            source_name = uploaded.name
+
+        if not code_input or not code_input.strip():
+            st.warning("Please paste code or upload a file to scan.")
+        else:
+            findings = detect(code_input)
+            masked_code = mask(code_input, findings)
+            preview = masked_code[:2000] + ("…" if len(masked_code) > 2000 else "")
+
+            if findings:
+                table = "| Line | Type | Method |\n|:-----|:-----|:-------|\n"
+                table += "\n".join(
+                    f"| {f['line_number']} | {f['type']} | {f['method']} |" for f in findings
+                )
+                user_display = (
+                    f"**Scanning `{source_name}`**, {len(findings)} issue(s) detected\n\n"
+                    f"{table}\n\n"
+                    f"```\n{preview}\n```"
+                )
+            else:
+                user_display = (
+                    f"**Scanning `{source_name}`**, ✅ No issues found\n\n```\n{preview}\n```"
+                )
+
+            with st.chat_message("user"):
+                st.markdown(user_display)
+
+            st.session_state.scans_total += 1
+            prev = st.session_state.previous_findings_count
+
+            if findings:
+                st.session_state.clean_scans_streak = 0
+                findings_summary = "\n".join(
+                    f"- Line {f['line_number']}: {f['type']} (detected via {f['method']})"
+                    for f in findings
+                )
+                api_user_content = (
+                    f"I submitted code for security scanning. Findings:\n\n{findings_summary}\n\n"
+                    f"Sanitized code (secrets replaced with [REDACTED]):\n```\n{masked_code}\n```\n\n"
+                    "Please explain each finding, why it's dangerous, and how to fix it using environment variables."
+                )
+            else:
+                st.session_state.clean_scans_streak += 1
+                if prev > 0:
+                    st.session_state.findings_fixed += prev
+                    st.success(f"🎉 You fixed {prev} finding(s), great work!")
+                api_user_content = (
+                    "I submitted code for security scanning and no hardcoded credentials were detected. "
+                    "Please give a brief encouraging message and a quick reminder of good security practices."
+                )
+
+            st.session_state.previous_findings_count = len(findings)
+
+            new_achievements = check_new_achievements(st.session_state)
+            if new_achievements:
+                st.session_state.new_achievement_alerts = new_achievements
+
+            api_msgs = st.session_state.api_messages + [{"role": "user", "content": api_user_content}]
+            with st.chat_message("assistant"):
+                response = st.write_stream(stream_response(api_msgs))
+
+            st.session_state.messages.append({"role": "user", "content": user_display})
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            st.session_state.api_messages.append({"role": "user", "content": api_user_content})
+            st.session_state.api_messages.append({"role": "assistant", "content": response})
+            st.rerun()
+
+    # ── Free-form chat ───────────────────────────────────────────────────────────
+    if user_text := st.chat_input("Ask a security question..."):
+        with st.chat_message("user"):
+            st.markdown(user_text)
+
+        api_msgs = st.session_state.api_messages + [{"role": "user", "content": user_text}]
+        with st.chat_message("assistant"):
+            response = st.write_stream(stream_response(api_msgs))
+
+        st.session_state.messages.append({"role": "user", "content": user_text})
         st.session_state.messages.append({"role": "assistant", "content": response})
-        st.session_state.api_messages.append({"role": "user", "content": api_user_content})
+        st.session_state.api_messages.append({"role": "user", "content": user_text})
         st.session_state.api_messages.append({"role": "assistant", "content": response})
         st.rerun()
 
-# ── Free-form chat ─────────────────────────────────────────────────────────────
-if user_text := st.chat_input("Ask a security question or request a lesson..."):
-    with st.chat_message("user"):
-        st.markdown(user_text)
+    # ── Session summary ──────────────────────────────────────────────────────────
+    if st.session_state.api_messages:
+        st.divider()
+        if st.button("📋 Get Session Summary"):
+            with st.spinner("Generating summary…"):
+                st.session_state.last_summary = generate_summary(st.session_state.api_messages)
 
-    api_msgs = st.session_state.api_messages + [{"role": "user", "content": user_text}]
-    with st.chat_message("assistant"):
-        response = st.write_stream(stream_response(api_msgs))
-
-    st.session_state.messages.append({"role": "user", "content": user_text})
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    st.session_state.api_messages.append({"role": "user", "content": user_text})
-    st.session_state.api_messages.append({"role": "assistant", "content": response})
-    st.rerun()
-
-# ── Session summary ────────────────────────────────────────────────────────────
-if st.session_state.api_messages:
-    st.divider()
-    if st.button("📋 Get Session Summary"):
-        with st.spinner("Generating summary…"):
-            st.session_state.last_summary = generate_summary(st.session_state.api_messages)
-
-    if st.session_state.last_summary:
-        with st.expander("Session Summary", expanded=True):
-            st.markdown(st.session_state.last_summary)
+        if st.session_state.last_summary:
+            with st.expander("Session Summary", expanded=True):
+                st.markdown(st.session_state.last_summary)

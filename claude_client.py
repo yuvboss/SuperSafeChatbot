@@ -4,25 +4,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SYSTEM_PROMPT = """You are SuperSafe, an expert security mentor for developers. Your job is to:
+SYSTEM_PROMPT = """You are Secure Coding Chatbot, an expert security mentor for developers. Your job is to:
 1. Explain why detected credentials are dangerous in clear, friendly language
 2. Show the developer exactly how to fix the issue using .env files and os.getenv()
 3. Generate short educational lessons when asked about security concepts
-4. Encourage iteration — praise improvement, guide them toward the correct fix
+4. Encourage iteration, praise improvement, guide them toward the correct fix
 
 Always be encouraging, never alarmist. Focus on teaching, not just flagging. Keep responses concise and actionable."""
 
 MODEL = "claude-sonnet-4-6"
 
 _PLACEHOLDER_RESPONSE = (
-    "*(AI response placeholder — add `ANTHROPIC_API_KEY` to your `.env` file to enable real responses.)*\n\n"
-    "Once connected, SuperSafe will explain any findings, show you exactly how to fix them using "
+    "*(AI response placeholder, add `ANTHROPIC_API_KEY` to your `.env` file to enable real responses.)*\n\n"
+    "Once connected, Secure Coding Chatbot will explain any findings, show you exactly how to fix them using "
     "environment variables, and coach you toward secure code."
 )
 
 _SUMMARY_PLACEHOLDER = (
-    "**Session Summary** *(placeholder — add `ANTHROPIC_API_KEY` to enable AI summaries)*\n\n"
-    "Once connected, SuperSafe will recap: credentials found, what you fixed, "
+    "**Session Summary** *(placeholder, add `ANTHROPIC_API_KEY` to enable AI summaries)*\n\n"
+    "Once connected, Secure Coding Chatbot will recap: credentials found, what you fixed, "
     "key lessons learned, and suggested next steps."
 )
 

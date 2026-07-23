@@ -43,7 +43,7 @@ def detect(code: str) -> list:
                         "method": "regex",
                     })
 
-    # Shannon entropy scan — flag high-randomness strings
+    # Shannon entropy scan, flags high-randomness strings
     for i, line in enumerate(lines, 1):
         tokens = re.split(r'[\s\'"=,;:(){}\[\]]+', line)
         for token in tokens:
