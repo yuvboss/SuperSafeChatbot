@@ -1,5 +1,4 @@
 streamlit
 anthropic
 python-dotenv
-pyyaml
 extra-streamlit-components

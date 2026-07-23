@@ -22,7 +22,7 @@ streamlit run app.py
 
 ## Key Architecture Constraints
 
-- **No persistence:** All state lives in `st.session_state`. Nothing is written to disk or a database.
+- **No persistence, with one exception:** All chat/scan state lives in `st.session_state`. User accounts are the one exception — they're stored in a local, git-ignored `users.json` (hashed passwords only, never plaintext). On Streamlit Cloud, this file resets on every redeploy, so accounts don't survive deploys. That's an accepted limitation for this demo app, not a bug.
 - **Secret masking:** Any detected credentials in user-submitted code must be redacted/masked *before* the code is sent to the Claude API. Never send raw secrets to the model.
 - **Deployable:** The app must run cleanly on Streamlit Cloud — avoid local-only dependencies.
 

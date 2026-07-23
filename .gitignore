@@ -2,4 +2,8 @@
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
-users.yaml
+users.json
+.venv/
+.vscode/
+.DS_Store
+Information/
