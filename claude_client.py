@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import os
+import re
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -44,6 +47,72 @@ def stream_response(messages: list):
     ) as stream:
         for text in stream.text_stream:
             yield text
+
+
+_FIX_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n(.*?)```", re.DOTALL)
+
+_FIX_PLACEHOLDER = {
+    "explanation": _PLACEHOLDER_RESPONSE,
+    "fixed_code": None,
+    "raw_response": _PLACEHOLDER_RESPONSE,
+}
+
+
+def _parse_fix_response(text: str) -> dict:
+    """Split a generate_fix() response into explanation prose and an optional
+    fixed-code block. Falls back to treating the whole reply as explanation
+    (fixed_code=None) if the model didn't follow the requested format."""
+    marker = "FIXED_CODE:"
+    if marker not in text:
+        return {"explanation": text.strip(), "fixed_code": None, "raw_response": text}
+
+    explanation, _, rest = text.partition(marker)
+    explanation = explanation.replace("EXPLANATION:", "", 1).strip()
+
+    fence_match = _FIX_CODE_FENCE_RE.search(rest)
+    fixed_code = fence_match.group(1).rstrip("\n") if fence_match else None
+
+    return {"explanation": explanation, "fixed_code": fixed_code, "raw_response": text}
+
+
+def generate_fix(filename: str, findings: list, masked_code: str, history: list | None = None) -> dict:
+    """Ask Claude to explain the findings AND propose a corrected version of
+    the file. `history` is the prior api_messages conversation, so this call
+    stays in context like the other chat turns. Returns
+    {"explanation": str, "fixed_code": str | None, "raw_response": str};
+    fixed_code is None whenever no fix could be parsed out, which callers use
+    to decide whether to show a diff at all."""
+    findings_summary = "\n".join(
+        f"- Line {f['line_number']}: {f['type']} (detected via {f['method']})" for f in findings
+    )
+    user_content = (
+        f"I submitted `{filename}` for security scanning. Findings:\n\n{findings_summary}\n\n"
+        f"Sanitized code (secrets replaced with [REDACTED]):\n```\n{masked_code}\n```\n\n"
+        "Respond in exactly this format, with no extra text before or after:\n\n"
+        "EXPLANATION:\n"
+        "<explain each finding, why it's dangerous, and how to fix it using environment variables>\n\n"
+        "FIXED_CODE:\n"
+        "```\n"
+        "<the complete corrected file content, with every flagged value replaced by an environment-variable "
+        "lookup appropriate for the file's language (e.g. os.getenv() in Python), and nothing else changed>\n"
+        "```"
+    )
+
+    if not _has_key():
+        placeholder = dict(_FIX_PLACEHOLDER)
+        placeholder["api_user_content"] = user_content
+        return placeholder
+
+    client = Anthropic()
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=1536,
+        system=SYSTEM_PROMPT,
+        messages=(history or []) + [{"role": "user", "content": user_content}],
+    )
+    result = _parse_fix_response(response.content[0].text)
+    result["api_user_content"] = user_content
+    return result
 
 
 def generate_summary(messages: list) -> str:

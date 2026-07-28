@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from detection import detect
 from masking import mask
-from claude_client import stream_response, generate_summary
+from claude_client import stream_response, generate_summary, generate_fix
+from diffing import unified_diff_html
+import zip_utils
 from achievements import ALL_ACHIEVEMENTS, check_new_achievements
 from auth import (
     authenticate_user,
@@ -265,8 +267,8 @@ if not st.session_state.get("logged_in"):
 
 
 # ── Session state init (runs only when logged in) ──────────────────────────────
-def _init_state():
-    defaults = {
+def _app_state_defaults():
+    return {
         "messages": [{"role": "assistant", "content": WELCOME}],
         "api_messages": [],
         "scans_total": 0,
@@ -278,21 +280,304 @@ def _init_state():
         "current_view": "main",
         "lesson_chats": {},
         "last_summary": None,
+        "pending_fix": None,
+        "batch_review": None,
     }
-    for k, v in defaults.items():
+
+
+def _init_state():
+    for k, v in _app_state_defaults().items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
 _init_state()
 
+
+# ── Scan + fix helpers ───────────────────────────────────────────────────────────
+def _credit_fix(count: int):
+    st.session_state.findings_fixed += count
+    st.session_state.previous_findings_count = 0
+    new_achievements = check_new_achievements(st.session_state)
+    if new_achievements:
+        st.session_state.new_achievement_alerts = new_achievements
+
+
+def _explain_applied_change(changes: list):
+    """After the user actually applies fix(es), ask Claude for a short teaching
+    recap of what changed and why, streamed into the chat like any other reply.
+    `changes` is a list of {source_name, before, after} dicts."""
+    diffs = "\n\n".join(
+        f"`{c['source_name']}`\nBefore:\n```\n{c['before']}\n```\nAfter:\n```\n{c['after']}\n```"
+        for c in changes
+    )
+    plural = "these files" if len(changes) > 1 else "this file"
+    change_prompt = (
+        f"I just accepted your suggested fix and applied it to {plural}. Here's exactly what changed:\n\n"
+        f"{diffs}\n\n"
+        "In a few concise sentences per file, explain what changed and why it's safer now, "
+        "as a quick teaching recap, not a re-explanation of the original finding."
+    )
+    with st.chat_message("assistant"):
+        response = st.write_stream(
+            stream_response(st.session_state.api_messages + [{"role": "user", "content": change_prompt}])
+        )
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.session_state.api_messages.append({"role": "user", "content": change_prompt})
+    st.session_state.api_messages.append({"role": "assistant", "content": response})
+
+
+def _render_pending_fix():
+    fix = st.session_state.pending_fix
+    if not fix:
+        return
+
+    st.subheader("🛠️ Suggested Fix")
+    st.markdown(unified_diff_html(fix["masked_code"], fix["fixed_code"]), unsafe_allow_html=True)
+
+    if fix["decision"] == "accepted":
+        st.success(f"Fix accepted for `{fix['source_name']}`.")
+        st.download_button(
+            "⬇️ Download fixed file",
+            data=fix["fixed_code"],
+            file_name=fix["source_name"],
+            use_container_width=True,
+            key="download_pending_fix",
+        )
+        if st.button("Dismiss", key="dismiss_pending_fix"):
+            st.session_state.pending_fix = None
+            st.rerun()
+        return
+
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Accept Fix", key="accept_pending_fix", use_container_width=True):
+        _credit_fix(len(fix["findings"]))
+        fix["decision"] = "accepted"
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"✅ Fix accepted for `{fix['source_name']}`."}
+        )
+        _explain_applied_change(
+            [{"source_name": fix["source_name"], "before": fix["masked_code"], "after": fix["fixed_code"]}]
+        )
+        st.rerun()
+    if col2.button("❌ Deny Fix", key="deny_pending_fix", use_container_width=True):
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"Fix dismissed for `{fix['source_name']}`, code left unchanged."}
+        )
+        st.session_state.pending_fix = None
+        st.rerun()
+
+
+def _handle_single_scan(code_input: str, source_name: str):
+    st.session_state.batch_review = None
+    st.session_state.pop("_fixed_zip_bytes", None)
+    st.session_state.pop("_fixed_zip_name", None)
+
+    findings = detect(code_input)
+    masked_code = mask(code_input, findings)
+    preview = masked_code[:2000] + ("…" if len(masked_code) > 2000 else "")
+
+    if findings:
+        table = "| Line | Type | Method |\n|:-----|:-----|:-------|\n"
+        table += "\n".join(
+            f"| {f['line_number']} | {f['type']} | {f['method']} |" for f in findings
+        )
+        user_display = (
+            f"**Scanning `{source_name}`**, {len(findings)} issue(s) detected\n\n"
+            f"{table}\n\n"
+            f"```\n{preview}\n```"
+        )
+    else:
+        user_display = f"**Scanning `{source_name}`**, ✅ No issues found\n\n```\n{preview}\n```"
+
+    with st.chat_message("user"):
+        st.markdown(user_display)
+
+    st.session_state.scans_total += 1
+    prev = st.session_state.previous_findings_count
+
+    if findings:
+        st.session_state.clean_scans_streak = 0
+        st.session_state.pending_fix = None
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing and drafting a fix…"):
+                result = generate_fix(source_name, findings, masked_code, st.session_state.api_messages)
+            st.markdown(result["explanation"])
+        response = result["explanation"]
+        api_user_content = result["api_user_content"]
+
+        if result["fixed_code"]:
+            st.session_state.pending_fix = {
+                "source_name": source_name,
+                "masked_code": masked_code,
+                "fixed_code": result["fixed_code"],
+                "findings": findings,
+                "decision": None,
+            }
+    else:
+        st.session_state.clean_scans_streak += 1
+        st.session_state.pending_fix = None
+        if prev > 0:
+            st.session_state.findings_fixed += prev
+            st.success(f"🎉 You fixed {prev} finding(s), great work!")
+        api_user_content = (
+            "I submitted code for security scanning and no hardcoded credentials were detected. "
+            "Please give a brief encouraging message and a quick reminder of good security practices."
+        )
+        with st.chat_message("assistant"):
+            response = st.write_stream(
+                stream_response(st.session_state.api_messages + [{"role": "user", "content": api_user_content}])
+            )
+
+    st.session_state.previous_findings_count = len(findings)
+
+    new_achievements = check_new_achievements(st.session_state)
+    if new_achievements:
+        st.session_state.new_achievement_alerts = new_achievements
+
+    st.session_state.messages.append({"role": "user", "content": user_display})
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.session_state.api_messages.append({"role": "user", "content": api_user_content})
+    st.session_state.api_messages.append({"role": "assistant", "content": response})
+    st.rerun()
+
+
+def _handle_zip_scan(uploaded_file):
+    st.session_state.pending_fix = None
+    st.session_state.pop("_fixed_zip_bytes", None)
+    st.session_state.pop("_fixed_zip_name", None)
+
+    try:
+        entries = zip_utils.extract_zip(uploaded_file)
+    except ValueError as e:
+        st.error(str(e))
+        return
+
+    results = {}
+    flagged = 0
+    total_findings = 0
+    for entry in entries:
+        if not entry["scannable"]:
+            continue
+        findings = detect(entry["text"])
+        if not findings:
+            continue
+        masked_code = mask(entry["text"], findings)
+        with st.spinner(f"Analyzing {entry['relpath']}…"):
+            result = generate_fix(entry["relpath"], findings, masked_code, st.session_state.api_messages)
+        results[entry["relpath"]] = {
+            "findings": findings,
+            "masked_code": masked_code,
+            "fixed_code": result["fixed_code"],
+            "explanation": result["explanation"],
+        }
+        flagged += 1
+        total_findings += len(findings)
+        st.session_state.api_messages.append({"role": "user", "content": result["api_user_content"]})
+        st.session_state.api_messages.append({"role": "assistant", "content": result["raw_response"]})
+
+    st.session_state.scans_total += 1
+    st.session_state.batch_review = {
+        "zip_name": uploaded_file.name,
+        "entries": entries,
+        "results": results,
+    }
+
+    scanned = sum(1 for e in entries if e["scannable"])
+    if flagged:
+        st.session_state.clean_scans_streak = 0
+        summary = (
+            f"**Scanning `{uploaded_file.name}`**, {len(entries)} file(s) in archive, "
+            f"{scanned} scanned, {total_findings} issue(s) across {flagged} file(s)\n\n"
+            + "\n".join(f"- `{path}`: {len(r['findings'])} issue(s)" for path, r in results.items())
+        )
+        assistant_note = (
+            f"I've reviewed {scanned} scannable file(s) in `{uploaded_file.name}` and proposed fixes for "
+            f"{flagged} of them, take a look at the review below."
+        )
+    else:
+        st.session_state.clean_scans_streak += 1
+        summary = (
+            f"**Scanning `{uploaded_file.name}`**, {len(entries)} file(s) in archive, "
+            f"{scanned} scanned, ✅ no issues found"
+        )
+        assistant_note = "No hardcoded credentials found across the archive, nice work!"
+
+    st.session_state.messages.append({"role": "user", "content": summary})
+    st.session_state.messages.append({"role": "assistant", "content": assistant_note})
+
+    new_achievements = check_new_achievements(st.session_state)
+    if new_achievements:
+        st.session_state.new_achievement_alerts = new_achievements
+
+    st.rerun()
+
+
+def _render_batch_review():
+    batch = st.session_state.batch_review
+    if not batch or not batch["results"]:
+        return
+
+    st.subheader(f"🗂️ Review: `{batch['zip_name']}`")
+    overrides = {}
+    for relpath, result in batch["results"].items():
+        with st.expander(f"{relpath} — {len(result['findings'])} issue(s)"):
+            st.markdown(result["explanation"])
+            if result["fixed_code"]:
+                st.markdown(
+                    unified_diff_html(result["masked_code"], result["fixed_code"]), unsafe_allow_html=True
+                )
+                decision = st.radio(
+                    "Decision", ["Keep original", "Accept fix"],
+                    key=f"decision_{relpath}", horizontal=True,
+                )
+                if decision == "Accept fix":
+                    overrides[relpath] = result["fixed_code"]
+            else:
+                st.caption("No automatic fix could be generated for this file.")
+
+    st.caption(
+        f"{len(overrides)} of {len(batch['results'])} flagged file(s) will be replaced with the fixed version."
+    )
+
+    if st.button("📦 Build & Download Fixed Zip", use_container_width=True, key="build_fixed_zip"):
+        zip_bytes = zip_utils.build_zip(batch["entries"], overrides)
+        accepted_findings = sum(
+            len(result["findings"]) for path, result in batch["results"].items() if path in overrides
+        )
+        if accepted_findings:
+            _credit_fix(accepted_findings)
+            _explain_applied_change([
+                {"source_name": path, "before": batch["results"][path]["masked_code"], "after": fixed_text}
+                for path, fixed_text in overrides.items()
+            ])
+        st.session_state["_fixed_zip_bytes"] = zip_bytes
+        st.session_state["_fixed_zip_name"] = f"fixed_{batch['zip_name']}"
+        st.rerun()
+
+    if st.session_state.get("_fixed_zip_bytes"):
+        st.download_button(
+            "⬇️ Download fixed archive",
+            data=st.session_state["_fixed_zip_bytes"],
+            file_name=st.session_state["_fixed_zip_name"],
+            mime="application/zip",
+            use_container_width=True,
+            key="download_fixed_zip",
+        )
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"Signed in as **{st.session_state.username}**")
     if st.button("Sign Out", use_container_width=True):
-        cookies.delete(COOKIE_NAME)
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        # `cookies.delete()` triggers its own internal rerun, so any code after
+        # it in this run never executes — clear state first, delete the cookie last.
+        for key in ["logged_in", "username", "show_auth", *_app_state_defaults()]:
+            st.session_state.pop(key, None)
+        if cookies.get(COOKIE_NAME) is not None:
+            # CookieManager.delete() does a bare `del` with no existence check,
+            # so it raises KeyError for users who never set a "remember me" cookie.
+            cookies.delete(COOKIE_NAME)
         st.rerun()
 
     if not API_KEY_PRESENT:
@@ -407,81 +692,27 @@ else:
             "Paste your code here", height=200, placeholder="# Paste code to scan..."
         )
         uploaded = st.file_uploader(
-            "...or upload a file",
-            type=["py", "js", "ts", "env", "txt", "yaml", "yml", "json"],
+            "...or upload a file, or a .zip of a whole directory",
+            type=["py", "js", "ts", "env", "txt", "yaml", "yml", "json", "zip"],
         )
         submitted = st.form_submit_button("Scan Code 🔍")
 
     if submitted:
-        source_name = "pasted code"
-        if uploaded is not None:
-            code_input = uploaded.read().decode("utf-8", errors="replace")
-            source_name = uploaded.name
-
-        if not code_input or not code_input.strip():
-            st.warning("Please paste code or upload a file to scan.")
+        if uploaded is not None and uploaded.name.lower().endswith(".zip"):
+            _handle_zip_scan(uploaded)
         else:
-            findings = detect(code_input)
-            masked_code = mask(code_input, findings)
-            preview = masked_code[:2000] + ("…" if len(masked_code) > 2000 else "")
+            source_name = "pasted code"
+            if uploaded is not None:
+                code_input = uploaded.read().decode("utf-8", errors="replace")
+                source_name = uploaded.name
 
-            if findings:
-                table = "| Line | Type | Method |\n|:-----|:-----|:-------|\n"
-                table += "\n".join(
-                    f"| {f['line_number']} | {f['type']} | {f['method']} |" for f in findings
-                )
-                user_display = (
-                    f"**Scanning `{source_name}`**, {len(findings)} issue(s) detected\n\n"
-                    f"{table}\n\n"
-                    f"```\n{preview}\n```"
-                )
+            if not code_input or not code_input.strip():
+                st.warning("Please paste code or upload a file to scan.")
             else:
-                user_display = (
-                    f"**Scanning `{source_name}`**, ✅ No issues found\n\n```\n{preview}\n```"
-                )
+                _handle_single_scan(code_input, source_name)
 
-            with st.chat_message("user"):
-                st.markdown(user_display)
-
-            st.session_state.scans_total += 1
-            prev = st.session_state.previous_findings_count
-
-            if findings:
-                st.session_state.clean_scans_streak = 0
-                findings_summary = "\n".join(
-                    f"- Line {f['line_number']}: {f['type']} (detected via {f['method']})"
-                    for f in findings
-                )
-                api_user_content = (
-                    f"I submitted code for security scanning. Findings:\n\n{findings_summary}\n\n"
-                    f"Sanitized code (secrets replaced with [REDACTED]):\n```\n{masked_code}\n```\n\n"
-                    "Please explain each finding, why it's dangerous, and how to fix it using environment variables."
-                )
-            else:
-                st.session_state.clean_scans_streak += 1
-                if prev > 0:
-                    st.session_state.findings_fixed += prev
-                    st.success(f"🎉 You fixed {prev} finding(s), great work!")
-                api_user_content = (
-                    "I submitted code for security scanning and no hardcoded credentials were detected. "
-                    "Please give a brief encouraging message and a quick reminder of good security practices."
-                )
-
-            st.session_state.previous_findings_count = len(findings)
-
-            new_achievements = check_new_achievements(st.session_state)
-            if new_achievements:
-                st.session_state.new_achievement_alerts = new_achievements
-
-            api_msgs = st.session_state.api_messages + [{"role": "user", "content": api_user_content}]
-            with st.chat_message("assistant"):
-                response = st.write_stream(stream_response(api_msgs))
-
-            st.session_state.messages.append({"role": "user", "content": user_display})
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.api_messages.append({"role": "user", "content": api_user_content})
-            st.session_state.api_messages.append({"role": "assistant", "content": response})
-            st.rerun()
+    _render_pending_fix()
+    _render_batch_review()
 
     # ── Free-form chat ───────────────────────────────────────────────────────────
     if user_text := st.chat_input("Ask a security question..."):
