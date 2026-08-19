@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  #btn {
+    width: 100%; box-sizing: border-box; padding: 0.5rem 1rem; border-radius: 8px;
+    border: 1px solid rgba(49,51,63,0.2); background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    color: white; font-weight: 600; font-size: 1rem; cursor: pointer;
+  }
+  #btn:disabled { opacity: 0.6; cursor: default; }
+  #msg { font-size: 0.82rem; color: #e5484d; margin-top: 0.4rem; min-height: 1.1em; }
+</style>
+</head>
+<body>
+  <button id="btn">Continue</button>
+  <div id="msg"></div>
+
+<script>
+(function () {
+  const btn = document.getElementById("btn");
+  const msg = document.getElementById("msg");
+  let currentArgs = null;
+
+  function post(payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, payload), "*");
+  }
+
+  function setFrameHeight() {
+    post({ type: "streamlit:setFrameHeight", height: document.documentElement.scrollHeight });
+  }
+
+  function setValue(value) {
+    post({ type: "streamlit:setComponentValue", value: value, dataType: "json" });
+  }
+
+  window.addEventListener("message", async (event) => {
+    const data = event.data;
+    if (!data || data.type !== "streamlit:render") return;
+    currentArgs = data.args || {};
+    btn.textContent = currentArgs.label || "Continue";
+    btn.disabled = false;
+    msg.textContent = "";
+    setFrameHeight();
+  });
+
+  btn.addEventListener("click", async () => {
+    if (!currentArgs) return;
+    msg.textContent = "";
+    if (!window.PublicKeyCredential || !PublicKeyCredential.parseCreationOptionsFromJSON) {
+      msg.textContent = "This browser doesn't support passkeys.";
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const optionsJSON = JSON.parse(currentArgs.options);
+      let credential;
+      if (currentArgs.action === "register") {
+        const publicKey = PublicKeyCredential.parseCreationOptionsFromJSON(optionsJSON);
+        credential = await navigator.credentials.create({ publicKey });
+      } else {
+        const publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(optionsJSON);
+        credential = await navigator.credentials.get({ publicKey });
+      }
+      const credentialJSON = credential.toJSON();
+      setValue({ ok: true, nonce: currentArgs.nonce, credential: credentialJSON });
+    } catch (err) {
+      msg.textContent = err && err.message ? err.message : String(err);
+      setValue({ ok: false, nonce: currentArgs.nonce, error: msg.textContent });
+    } finally {
+      btn.disabled = false;
+      setFrameHeight();
+    }
+  });
+
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+  setFrameHeight();
+})();
+</script>
+</body>
+</html>

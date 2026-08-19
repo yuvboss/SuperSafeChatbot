@@ -1,4 +1,7 @@
 streamlit
-anthropic
+google-genai
 python-dotenv
 extra-streamlit-components
+pyotp
+qrcode
+webauthn

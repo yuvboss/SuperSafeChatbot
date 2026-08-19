@@ -10,7 +10,7 @@ Secure Coding Chatbot (built by SuperSafe) is a Streamlit web app that acts as a
 
 - **Language:** Python
 - **Web framework:** Streamlit (deployed to Streamlit Cloud)
-- **AI engine:** Claude API (`anthropic` SDK)
+- **AI engine:** Gemini API (`google-genai` SDK), model configurable via `GEMINI_MODEL` (defaults to `gemini-3.6-flash`)
 - **Version control:** GitHub, github.com/yuvboss/SuperSafeChatbot
 
 ## Running the App

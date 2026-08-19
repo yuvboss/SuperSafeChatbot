@@ -1,13 +1,16 @@
+import io
 import os
 import streamlit as st
 import extra_streamlit_components as stx
+import qrcode
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from detection import detect
 from masking import mask
-from claude_client import stream_response, generate_summary, generate_fix
+from gemini_client import stream_response, generate_summary, generate_fix
 from diffing import unified_diff_html
 import zip_utils
+import passkeys
 from achievements import ALL_ACHIEVEMENTS, check_new_achievements
 from auth import (
     authenticate_user,
@@ -16,13 +19,20 @@ from auth import (
     create_session_token,
     verify_session_token,
     COOKIE_NAME,
+    is_totp_enabled,
+    get_totp_secret,
+    generate_totp_secret,
+    totp_provisioning_uri,
+    verify_totp_code,
+    enable_totp,
+    disable_totp,
 )
 
 load_dotenv()
 
 st.set_page_config(page_title="Secure Coding Chatbot", page_icon="🔐", layout="wide")
 
-API_KEY_PRESENT = bool(os.environ.get("ANTHROPIC_API_KEY"))
+API_KEY_PRESENT = bool(os.environ.get("GEMINI_API_KEY"))
 
 
 cookies = stx.CookieManager(key="cookie_mgr")
@@ -150,6 +160,53 @@ def _log_in(username: str, remember: bool):
     st.rerun()
 
 
+def _render_2fa_step():
+    username = st.session_state["_2fa_pending_user"]
+    st.markdown(f"**Two-factor code required for `{username}`**")
+    code = st.text_input("6-digit code from your authenticator app", key="tfa_code")
+    c1, c2 = st.columns(2)
+    if c1.button("Verify", use_container_width=True, key="tfa_verify"):
+        secret = get_totp_secret(username)
+        if secret and verify_totp_code(secret, code):
+            remember = st.session_state.pop("_2fa_pending_remember", False)
+            st.session_state.pop("_2fa_pending_user", None)
+            _log_in(username, remember)
+        else:
+            st.error("Invalid code, please try again.")
+    if c2.button("Cancel", use_container_width=True, key="tfa_cancel"):
+        st.session_state.pop("_2fa_pending_user", None)
+        st.session_state.pop("_2fa_pending_remember", None)
+        st.rerun()
+
+
+def _render_passkey_signin():
+    if st.session_state.get("_passkey_login_active"):
+        result = passkeys.ceremony_widget(
+            "authenticate",
+            st.session_state["_passkey_auth_options"],
+            "Continue with passkey",
+            key="login_passkey",
+        )
+        if result is not None:
+            st.session_state.pop("_passkey_login_active", None)
+            if result.get("ok"):
+                uname, error = passkeys.complete_authentication(result["credential"])
+                if uname:
+                    _log_in(uname, remember=False)
+                else:
+                    st.error(error)
+            else:
+                st.error(result.get("error") or "Passkey sign-in failed.")
+        if st.button("Cancel", key="cancel_passkey_login"):
+            st.session_state.pop("_passkey_login_active", None)
+            st.rerun()
+    else:
+        if st.button("🔑 Sign in with a passkey", use_container_width=True, key="start_passkey_login"):
+            passkeys.begin_authentication(None)
+            st.session_state["_passkey_login_active"] = True
+            st.rerun()
+
+
 def _show_landing():
     st.markdown(_AUTH_CSS, unsafe_allow_html=True)
     _, col, _ = st.columns([1, 3, 1])
@@ -211,18 +268,30 @@ def _show_auth():
             sign_in_tab, sign_up_tab = st.tabs(["Sign In", "Sign Up"])
 
             with sign_in_tab:
-                username = st.text_input("Username", key="si_user", autocomplete="username")
-                password = st.text_input(
-                    "Password", type="password", key="si_pass", autocomplete="current-password"
-                )
-                remember = st.checkbox("Remember me for 30 days", key="si_remember")
-                if st.button("Sign In", use_container_width=True, key="si_btn"):
-                    if not username or not password:
-                        st.error("Please enter your username and password.")
-                    elif authenticate_user(username, password):
-                        _log_in(username.strip(), remember)
-                    else:
-                        st.error("Incorrect username or password.")
+                if st.session_state.get("_2fa_pending_user"):
+                    _render_2fa_step()
+                else:
+                    username = st.text_input("Username", key="si_user", autocomplete="username")
+                    password = st.text_input(
+                        "Password", type="password", key="si_pass", autocomplete="current-password"
+                    )
+                    remember = st.checkbox("Remember me for 30 days", key="si_remember")
+                    if st.button("Sign In", use_container_width=True, key="si_btn"):
+                        if not username or not password:
+                            st.error("Please enter your username and password.")
+                        elif authenticate_user(username, password):
+                            uname = username.strip()
+                            if is_totp_enabled(uname):
+                                st.session_state["_2fa_pending_user"] = uname
+                                st.session_state["_2fa_pending_remember"] = remember
+                                st.rerun()
+                            else:
+                                _log_in(uname, remember)
+                        else:
+                            st.error("Incorrect username or password.")
+
+                    st.divider()
+                    _render_passkey_signin()
 
             with sign_up_tab:
                 new_username = st.text_input(
@@ -566,13 +635,96 @@ def _render_batch_review():
         )
 
 
+# ── Account security (TOTP + passkeys) ──────────────────────────────────────────
+def _render_totp_settings():
+    st.markdown("**Two-Factor Authentication (TOTP)**")
+    username = st.session_state.username
+    if is_totp_enabled(username):
+        st.caption("✅ Enabled")
+        if st.button("Disable 2FA", key="disable_totp"):
+            disable_totp(username)
+            st.rerun()
+    elif st.session_state.get("_totp_setup_secret"):
+        secret = st.session_state["_totp_setup_secret"]
+        uri = totp_provisioning_uri(username, secret)
+        buf = io.BytesIO()
+        qrcode.make(uri).save(buf, format="PNG")
+        st.image(buf.getvalue(), width=180)
+        st.caption(f"Or enter manually: `{secret}`")
+        code = st.text_input("Enter the 6-digit code to confirm", key="totp_confirm_code")
+        c1, c2 = st.columns(2)
+        if c1.button("Enable", key="confirm_totp", use_container_width=True):
+            if verify_totp_code(secret, code):
+                enable_totp(username, secret)
+                st.session_state.pop("_totp_setup_secret", None)
+                st.success("2FA enabled.")
+                st.rerun()
+            else:
+                st.error("Incorrect code, try again.")
+        if c2.button("Cancel", key="cancel_totp_setup", use_container_width=True):
+            st.session_state.pop("_totp_setup_secret", None)
+            st.rerun()
+    else:
+        st.caption("Not enabled")
+        if st.button("Set up 2FA", key="start_totp_setup"):
+            st.session_state["_totp_setup_secret"] = generate_totp_secret()
+            st.rerun()
+
+
+def _render_passkey_settings():
+    st.markdown("**Passkeys**")
+    username = st.session_state.username
+    for pk in passkeys.user_passkeys(username):
+        c1, c2 = st.columns([3, 1])
+        c1.caption(f"🔑 {pk['name']}, added {pk['created_at'][:10]}")
+        if c2.button("Remove", key=f"remove_pk_{pk['credential_id']}"):
+            passkeys.remove_passkey(username, pk["credential_id"])
+            st.rerun()
+
+    if st.session_state.get("_passkey_reg_active"):
+        result = passkeys.ceremony_widget(
+            "register",
+            st.session_state["_passkey_reg_options"],
+            "Create passkey",
+            key="reg_passkey",
+        )
+        if result is not None:
+            st.session_state.pop("_passkey_reg_active", None)
+            if result.get("ok"):
+                ok, error = passkeys.complete_registration(result["credential"])
+                if ok:
+                    st.success("Passkey added.")
+                else:
+                    st.error(error)
+            else:
+                st.error(result.get("error") or "Passkey registration failed.")
+        if st.button("Cancel", key="cancel_passkey_reg"):
+            st.session_state.pop("_passkey_reg_active", None)
+            st.rerun()
+    else:
+        nickname = st.text_input('Nickname (e.g. "MacBook Touch ID")', key="new_pk_nickname")
+        if st.button("Register a new passkey", key="start_passkey_reg", use_container_width=True):
+            passkeys.begin_registration(username, nickname or "Passkey")
+            st.session_state["_passkey_reg_active"] = True
+            st.rerun()
+
+
+_SECURITY_SETUP_KEYS = [
+    "_totp_setup_secret",
+    "_passkey_reg_active",
+    "_passkey_reg_challenge",
+    "_passkey_reg_nickname",
+    "_passkey_reg_options",
+]
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"Signed in as **{st.session_state.username}**")
     if st.button("Sign Out", use_container_width=True):
         # `cookies.delete()` triggers its own internal rerun, so any code after
         # it in this run never executes — clear state first, delete the cookie last.
-        for key in ["logged_in", "username", "show_auth", *_app_state_defaults()]:
+        for key in ["logged_in", "username", "show_auth", *_SECURITY_SETUP_KEYS, *_app_state_defaults()]:
             st.session_state.pop(key, None)
         if cookies.get(COOKIE_NAME) is not None:
             # CookieManager.delete() does a bare `del` with no existence check,
@@ -582,6 +734,13 @@ with st.sidebar:
 
     if not API_KEY_PRESENT:
         st.warning("No API key, so AI responses are placeholders.", icon="⚠️")
+
+    st.divider()
+
+    with st.expander("🔐 Account Security"):
+        _render_totp_settings()
+        st.divider()
+        _render_passkey_settings()
 
     st.divider()
 
@@ -625,7 +784,7 @@ st.caption("Your AI security mentor, paste code to scan for hardcoded secrets")
 
 if not API_KEY_PRESENT:
     st.info(
-        "**API key not configured.** Add `ANTHROPIC_API_KEY` to your `.env` file to enable AI responses. "
+        "**API key not configured.** Add `GEMINI_API_KEY` to your `.env` file to enable AI responses. "
         "Detection, masking, and gamification work fully without it.",
         icon="ℹ️",
     )

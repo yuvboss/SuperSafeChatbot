@@ -35,23 +35,23 @@ Then open the local URL Streamlit prints (usually `http://localhost:8501`).
 Copy `.env.example` to `.env` and fill in:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+GEMINI_API_KEY=your-gemini-api-key-here
 COOKIE_SECRET=a-long-random-string
 ```
 
-- `ANTHROPIC_API_KEY` enables real AI responses (Claude). Without it, the app still runs, detection, masking, auth, and achievements all work, and AI responses show a placeholder message.
+- `GEMINI_API_KEY` enables real AI responses (Gemini). Without it, the app still runs, detection, masking, auth, and achievements all work, and AI responses show a placeholder message.
 - `COOKIE_SECRET` signs the "Remember me" login cookie. Use a long random string in production; anyone with this value could forge a login cookie.
 
 ## Architecture notes
 
 - All chat and scan state lives in `st.session_state`, nothing persists across a page reload except login.
 - User accounts are the one exception to "no persistence", stored in a local, git-ignored `users.json` (hashed passwords only, never plaintext). On Streamlit Cloud this file resets on every redeploy, so accounts don't survive deploys, an accepted limitation for this demo, not a bug.
-- Detected credentials are masked *before* code is sent to the Claude API or displayed in the chat transcript.
+- Detected credentials are masked *before* code is sent to the Gemini API or displayed in the chat transcript.
 - Directory scans are handled entirely in memory (extract, scan, rebuild), with limits on file count/size to guard against oversized or malicious archives; there's no way for a hosted app to write back to your local filesystem, so "applying" fixes means downloading a rebuilt `.zip`, not an in-place overwrite.
 - Lesson chats are separate threads kept in session state alongside the main chat; they persist for the session but reset on reload, same as everything else except login.
 
 ## Tech stack
 
 - [Streamlit](https://streamlit.io/) (deployed to Streamlit Cloud)
-- [Claude API](https://docs.claude.com/) via the `anthropic` SDK
+- [Gemini API](https://ai.google.dev/gemini-api/docs) via the `google-genai` SDK
 - Python 3.9+

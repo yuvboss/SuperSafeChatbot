@@ -10,6 +10,8 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
+import pyotp
+
 _COOKIE_SECRET = os.environ.get("COOKIE_SECRET", "supersafe-dev-secret-change-me")
 COOKIE_NAME = "supersafe_session"
 _COOKIE_DAYS = 30
@@ -120,6 +122,73 @@ def authenticate_user(username: str, password: str) -> bool:
         return False
     _, expected_hash = hash_password(password, bytes.fromhex(record["salt"]))
     return hmac.compare_digest(expected_hash, record["password_hash"])
+
+
+# ── Shared user-record access (used by passkeys.py too) ────────────────────
+
+def load_users() -> dict:
+    return _load_users()
+
+
+def save_users(users: dict) -> None:
+    _save_users(users)
+
+
+def get_user(username: str) -> dict | None:
+    return _load_users().get(username.strip())
+
+
+# ── TOTP-based two-factor authentication ────────────────────────────────────
+
+TOTP_ISSUER = "Secure Coding Chatbot"
+
+
+def generate_totp_secret() -> str:
+    return pyotp.random_base32()
+
+
+def totp_provisioning_uri(username: str, secret: str) -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER)
+
+
+def verify_totp_code(secret: str, code: str) -> bool:
+    code = code.strip().replace(" ", "")
+    if not code:
+        return False
+    try:
+        return pyotp.TOTP(secret).verify(code, valid_window=1)
+    except Exception:
+        return False
+
+
+def is_totp_enabled(username: str) -> bool:
+    record = get_user(username)
+    return bool(record and record.get("totp_enabled") and record.get("totp_secret"))
+
+
+def get_totp_secret(username: str) -> str | None:
+    record = get_user(username)
+    return record.get("totp_secret") if record else None
+
+
+def enable_totp(username: str, secret: str) -> None:
+    users = _load_users()
+    record = users.get(username.strip())
+    if not record:
+        return
+    record["totp_secret"] = secret
+    record["totp_enabled"] = True
+    _save_users(users)
+
+
+def disable_totp(username: str) -> None:
+    users = _load_users()
+    record = users.get(username.strip())
+    if not record:
+        return
+    record.pop("totp_secret", None)
+    record["totp_enabled"] = False
+    _save_users(users)
 
 
 # ── Remember-me session tokens ──────────────────────────────────────────────
